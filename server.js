@@ -23,9 +23,46 @@ const INTERVAL_MS = {
   '1d': 24 * 60 * 60_000,
 };
 
+const DEFAULT_ORIGINS = [
+  'http://localhost:5173',
+  'http://localhost:5174',
+  'https://crypto-dashboard-3mk1.onrender.com',
+  'https://crypto-suman.netlify.app',
+];
+
+const envOrigins = String(process.env.CORS_ORIGINS || '')
+  .split(',')
+  .map((s) => s.trim().replace(/\/$/, ''))
+  .filter(Boolean);
+
+const allowedOrigins = [...new Set([...DEFAULT_ORIGINS, ...envOrigins])];
+
 app.use(
   cors({
-    origin: ['http://localhost:5173', 'http://localhost:5174'],
+    origin(origin, callback) {
+      // Non-browser / same-origin requests may omit Origin
+      if (!origin) return callback(null, true);
+
+      const normalized = origin.replace(/\/$/, '');
+      if (allowedOrigins.includes(normalized)) {
+        return callback(null, true);
+      }
+
+      // Allow project frontends hosted on Render or Netlify
+      if (/^https:\/\/[\w-]+\.onrender\.com$/i.test(normalized)) {
+        return callback(null, true);
+      }
+      if (/^https:\/\/[\w-]+\.netlify\.app$/i.test(normalized)) {
+        return callback(null, true);
+      }
+
+      // Optional escape hatch for temporary debugging
+      if (process.env.CORS_ALLOW_ALL === 'true') {
+        return callback(null, true);
+      }
+
+      return callback(new Error(`CORS blocked for origin: ${origin}`));
+    },
     credentials: true,
   })
 );
