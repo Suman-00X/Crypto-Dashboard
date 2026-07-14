@@ -188,39 +188,63 @@ function candleToMsPoints(candle, barMs) {
 
 async function fetchCandlesPaged(pair, interval, windowMs) {
   const barMs = INTERVAL_MS[interval];
-  const needed = Math.min(MAX_BARS, Math.ceil(windowMs / barMs) + 2);
+  const needed = Math.min(MAX_BARS, Math.ceil(windowMs / barMs) + 5);
   const candles = [];
   let endTime = Date.now();
   let pages = 0;
-  const maxPages = Math.ceil(needed / CANDLE_PAGE) + 1;
+  const maxPages = Math.ceil(needed / CANDLE_PAGE) + 2;
 
   while (candles.length < needed && pages < maxPages) {
     pages += 1;
-    const { data } = await axios.get(
-      'https://public.coindcx.com/market_data/candles/',
-      {
-        params: {
-          pair,
-          interval,
-          limit: CANDLE_PAGE,
-          endTime,
-        },
-        timeout: 20000,
-      }
-    );
-    if (!Array.isArray(data) || data.length === 0) break;
+    try {
+      const { data } = await axios.get(
+        'https://public.coindcx.com/market_data/candles/',
+        {
+          params: {
+            pair,
+            interval,
+            limit: CANDLE_PAGE,
+            endTime,
+          },
+          timeout: 20000,
+        }
+      );
+      if (!Array.isArray(data) || data.length === 0) break;
 
-    candles.push(...data);
-    const oldest = Number(data[data.length - 1].time);
-    if (Date.now() - oldest >= windowMs) break;
-    endTime = oldest - 1;
-    if (data.length < CANDLE_PAGE) break;
+      const before = candles.length;
+      candles.push(...data);
+      const oldest = Number(data[data.length - 1].time);
+      if (!Number.isFinite(oldest)) break;
+      if (Date.now() - oldest >= windowMs) break;
+      // Avoid infinite loop if API returns same page
+      if (candles.length === before) break;
+      endTime = oldest - 1;
+      if (data.length < CANDLE_PAGE) break;
+    } catch (err) {
+      console.error('candle page failed', pair, interval, err.message);
+      break;
+    }
   }
 
-  // newest-first unique by time
   const byTime = new Map();
   for (const c of candles) byTime.set(Number(c.time), c);
   return [...byTime.values()].sort((a, b) => Number(b.time) - Number(a.time));
+}
+
+async function fetchDailyCandles(pair, days) {
+  const limit = Math.min(1000, Math.max(days + 2, 5));
+  try {
+    const { data } = await axios.get(
+      'https://public.coindcx.com/market_data/candles/',
+      {
+        params: { pair, interval: '1d', limit },
+        timeout: 20000,
+      }
+    );
+    return Array.isArray(data) ? data : [];
+  } catch {
+    return [];
+  }
 }
 
 async function fetchRecentTrades(pair) {
@@ -294,36 +318,43 @@ async function buildMsPath(pair, candleDays) {
   const interval = pickInterval(candleDays);
   const barMs = INTERVAL_MS[interval];
 
-  const [candles, trades] = await Promise.all([
+  const [candles, trades, dailyCandles] = await Promise.all([
     fetchCandlesPaged(pair, interval, windowMs),
     fetchRecentTrades(pair),
+    fetchDailyCandles(pair, candleDays),
   ]);
 
-  if (!candles.length && !trades.length) return null;
+  if (!candles.length && !trades.length && !dailyCandles.length) return null;
 
   const chronological = [...candles].reverse();
   const candlePoints = chronological.flatMap((c) => candleToMsPoints(c, barMs));
   const path = mergePaths(candlePoints, trades);
 
   const chartCandles =
-    candles.length > 0
-      ? candles
-      : trades.map((tr) => ({
-          time: tr.t,
-          open: tr.p,
-          high: tr.p,
-          low: tr.p,
-          close: tr.p,
-          volume: tr.v,
-        }));
+    dailyCandles.length > 0
+      ? dailyCandles
+      : candles.length > 0
+        ? candles
+        : trades.map((tr) => ({
+            time: tr.t,
+            open: tr.p,
+            high: tr.p,
+            low: tr.p,
+            close: tr.p,
+            volume: tr.v,
+          }));
+
+  const pathSpanMs = path.length > 1 ? path[path.length - 1].t - path[0].t : 0;
 
   const payload = {
     rawCandles: chartCandles,
+    dailyCandles, // authoritative close→close for Chg%
     pricePath: path,
     resolution: interval,
     minDeltaMs: minPositiveDeltaMs(path),
     pathPoints: path.length,
     tradeTicks: trades.length,
+    pathSpanDays: pathSpanMs / 86400000,
     cacheHit: false,
   };
 
